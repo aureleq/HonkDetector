@@ -5,7 +5,9 @@ import librosa, wave
 import json
 import hmac, hashlib
 import requests
+import csv
 
+URB_SOUND_DIR = "../UrbanSound8K/"
 API_URL = "https://ingestion.edgeimpulse.com/api/"
 API_KEY = ""
 HMAC_KEY =""
@@ -45,7 +47,6 @@ def createCborContent(audio_samples, interval_ms=0.0625):
     json_content['signature'] = signature
     cbor_content = json.dumps(json_content)
 
-    print(API_KEY)
     return cbor_content
 
 
@@ -77,20 +78,79 @@ def uploadFile(cbor_content, file_name, label, data_type = "training"):
                         })
     if (res.status_code == 200):
         print('Uploaded file to Edge Impulse', res.status_code, res.content)
+        return True
     else:
         print('Failed to upload file to Edge Impulse', res.status_code, res.content)
+        return False
 
+
+# returns array of relative paths of wav files to retrieve
+# foreground samples vs background (salience=1 is foreground sound)
+def getWaveFiles(sound_class = "car_horn", total_length = 600, foreground = 0.6):
+    paths = []
+    current_length = 0
+    current_fg_length = 0
+    max_fg_length = total_length * foreground
+
+    with open(URB_SOUND_DIR + "metadata/UrbanSound8K.csv") as csvFile:
+        data = csv.DictReader(csvFile)
+        
+        for row in data:
+            if current_length > total_length: # we retrieved enough samples
+                break
+
+            if row['class'] == sound_class:
+                sample_length = float(row['end']) - float(row['start'])
+                sample_path = URB_SOUND_DIR + "audio/fold" + row['fold'] + "/" + row['slice_file_name']
+
+                # DIRTY: Check if wav file format is compatible
+                try:
+                    with wave.open(sample_path, 'rb') as w:
+                        pass
+                except:
+                    print("File incompatible: " + sample_path)
+                    continue
+
+                if row['salience'] == '1':
+                    if sample_length + current_fg_length > max_fg_length: # we retrieved enough foreground samples
+                        continue
+                    else:
+                        current_fg_length += sample_length
+
+                paths += [sample_path]
+                current_length += sample_length
+    
+    return paths
 
 
 
 # main program
+
 with open('credentials.json') as c:    
     credentials = json.load(c)
+
 API_KEY = credentials['api_key']
 HMAC_KEY = credentials['hmac_key']
 DEVICE_NAME = credentials['device_name']
 DEVICE_TYPE = credentials['device_type']
 
-audio_samples = importWavFile('noise.11eq99bn.wav')
-cbor_content = createCborContent(audio_samples, interval_ms=0.0625)
-uploadFile(cbor_content, "test02", "noise")
+wav_files_paths = getWaveFiles("car_horn", 600, 0.6)
+print("Number of files to send:" + str(len(wav_files_paths)))
+
+failed_uploads = [] # save wav files paths in case upload fails
+
+for count, wf in enumerate(wav_files_paths):
+    
+    audio_samples = importWavFile(wf)
+    print(str(count) + ". Import wav file done")
+    cbor_content = createCborContent(audio_samples, interval_ms=0.0625)
+    print(str(count) + ". Cbor content done")
+
+    if uploadFile(cbor_content, wf.split('/')[-1], "car_horn", "training"): # wf.split() is the wav filename
+        print(str(count) + ". File " + wf + " import success")
+    else:
+        print(str(count) + ". File " + wf + " import failed!")
+        failed_uploads += [wf]
+
+print("List of failed uploads:")
+print(failed_uploads)
