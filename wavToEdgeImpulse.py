@@ -1,4 +1,4 @@
-# pip install librosa (numpy, scipy dependencies)
+# pip install librosa
 # pip install requests
 
 import librosa, wave
@@ -7,7 +7,9 @@ import hmac, hashlib
 import requests
 import csv
 
-URB_SOUND_DIR = "../UrbanSound8K/"
+URB_SOUND_DIR = "../UrbanSound8K/" # relative path of UrbanSound8K directory
+LABEL = "car_horn" # label to import from UrbanSound8K db
+TESTING_SPLIT = 0.25 # 25% of samples to be stored in testing dataset, 75% in training
 API_URL = "https://ingestion.edgeimpulse.com/api/"
 API_KEY = ""
 HMAC_KEY =""
@@ -15,27 +17,27 @@ DEVICE_NAME =""
 DEVICE_TYPE = ""
 
 
-
+# takes audio samples as input to create cbor content to send to Ingestion service
 def createCborContent(audio_samples, interval_ms=0.0625):
     # empty signature (all zeros). HS256 gives 32 byte signature, and we encode in hex, so we need 64 characters here
     empty_sig = ''.join(['0'] * 64)
     
     json_content = {
-        "protected": {
-            "ver": "v1",
-            "alg": "HS256"
-        },
-        "signature": empty_sig,
-        "payload": {
-            "device_name": DEVICE_NAME,
-            "device_type": DEVICE_TYPE,
-            "interval_ms": interval_ms,
-            "sensors": [
-                { "name": "audio", "units": "wav" }
-            ],
-            "values": audio_samples
-        }
-    }
+                        "protected": {
+                            "ver": "v1",
+                            "alg": "HS256"
+                        },
+                        "signature": empty_sig,
+                        "payload": {
+                            "device_name": DEVICE_NAME,
+                            "device_type": DEVICE_TYPE,
+                            "interval_ms": interval_ms,
+                            "sensors": [
+                                { "name": "audio", "units": "wav" }
+                            ],
+                            "values": audio_samples
+                        }
+                    }
     
     # encode in CBOR
     cbor_content = json.dumps(json_content)
@@ -50,7 +52,8 @@ def createCborContent(audio_samples, interval_ms=0.0625):
     return cbor_content
 
 
-# import wav samples as array
+# import wav file and convert to 16kHz/mono signal
+# returns audio samples as an array
 def importWavFile(fn):
     librosa_audio, librosa_sample_rate = librosa.load(fn, sr=16000, mono=True)
 
@@ -59,14 +62,15 @@ def importWavFile(fn):
     with wave.open(fn, 'rb') as w: 
         sample_width = w.getsampwidth() * 8
 
-    if sample_width == 8: # 8 bits is unsigned
+    if sample_width == 8: # 8 bits should always be unsigned format
         audio_samples = librosa_audio * 2**sample_width
-    else: # > 16 bits is signed
+    else: # > 16 bits is signed format
         audio_samples = librosa_audio * 2**(sample_width-1)
 
     return audio_samples.tolist()
 
 
+# upload wav content to Ingestion service 
 def uploadFile(cbor_content, file_name, label, data_type = "training"):
     res = requests.post(url=API_URL + data_type + "/data",
                         data=cbor_content,
@@ -76,7 +80,7 @@ def uploadFile(cbor_content, file_name, label, data_type = "training"):
                             'x-label': label,
                             'x-api-key': API_KEY
                         })
-    if (res.status_code == 200):
+    if res.status_code == 200:
         print('Uploaded file to Edge Impulse', res.status_code, res.content)
         return True
     else:
@@ -84,9 +88,9 @@ def uploadFile(cbor_content, file_name, label, data_type = "training"):
         return False
 
 
-# returns array of relative paths of wav files to retrieve
-# foreground samples vs background (salience=1 is foreground sound)
-def getWaveFiles(sound_class = "car_horn", total_length = 600, foreground = 0.6):
+# scans UrbanSound8K content to retrieve specific sound class
+# returns array of relative paths of wav files
+def getWaveFiles(sound_class = LABEL, total_length = 600, foreground = 0.6):
     paths = []
     current_length = 0
     current_fg_length = 0
@@ -111,7 +115,7 @@ def getWaveFiles(sound_class = "car_horn", total_length = 600, foreground = 0.6)
                     print("File incompatible: " + sample_path)
                     continue
 
-                if row['salience'] == '1':
+                if row['salience'] == '1': # foreground sound
                     if sample_length + current_fg_length > max_fg_length: # we retrieved enough foreground samples
                         continue
                     else:
@@ -126,6 +130,7 @@ def getWaveFiles(sound_class = "car_horn", total_length = 600, foreground = 0.6)
 
 # main program
 
+# load credentials
 with open('credentials.json') as c:    
     credentials = json.load(c)
 
@@ -134,23 +139,30 @@ HMAC_KEY = credentials['hmac_key']
 DEVICE_NAME = credentials['device_name']
 DEVICE_TYPE = credentials['device_type']
 
-wav_files_paths = getWaveFiles("car_horn", 600, 0.6)
+# retrieve 600 seconds from LABEL class with 50% foreground sound type
+wav_files_paths = getWaveFiles(LABEL, 600, 0.5)
 print("Number of files to send:" + str(len(wav_files_paths)))
 
 failed_uploads = [] # save wav files paths in case upload fails
+current_dataset = "training"
 
+# scan all wav files to upload to ingestion service
 for count, wf in enumerate(wav_files_paths):
     
     audio_samples = importWavFile(wf)
     print(str(count) + ". Import wav file done")
-    cbor_content = createCborContent(audio_samples, interval_ms=0.0625)
+    cbor_content = createCborContent(audio_samples, interval_ms=0.0625) # 1/16 kHz interval
     print(str(count) + ". Cbor content done")
 
-    if uploadFile(cbor_content, wf.split('/')[-1], "car_horn", "training"): # wf.split() is the wav filename
+    # upload file and label as LABEL in the training dataset
+    if uploadFile(cbor_content, wf.split('/')[-1], LABEL, current_dataset): # wf.split() is the wav filename
         print(str(count) + ". File " + wf + " import success")
     else:
         print(str(count) + ". File " + wf + " import failed!")
         failed_uploads += [wf]
+    
+    if count/len(wav_files_paths) >= (1-TESTING_SPLIT): # change dataset to testing
+        current_dataset = "testing"
 
 print("List of failed uploads:")
 print(failed_uploads)
