@@ -8,8 +8,10 @@ import requests
 import csv
 
 URB_SOUND_DIR = "../UrbanSound8K/" # relative path of UrbanSound8K directory
-LABEL = "car_horn" # label to import from UrbanSound8K db
+LABEL = "engine_idling" # label to import from UrbanSound8K db
+LENGTH = 600 # number of seconds to retrieve from samples 
 TESTING_SPLIT = 0.25 # 25% of samples to be stored in testing dataset, 75% in training
+FOREGROUND = 0.5 # 50% of foreground sounds
 API_URL = "https://ingestion.edgeimpulse.com/api/"
 API_KEY = ""
 HMAC_KEY =""
@@ -140,7 +142,7 @@ DEVICE_NAME = credentials['device_name']
 DEVICE_TYPE = credentials['device_type']
 
 # retrieve 600 seconds from LABEL class with 50% foreground sound type
-wav_files_paths = getWaveFiles(LABEL, 600, 0.5)
+wav_files_paths = getWaveFiles(LABEL, LENGTH, FOREGROUND)
 print("Number of files to send:" + str(len(wav_files_paths)))
 
 failed_uploads = [] # save wav files paths in case upload fails
